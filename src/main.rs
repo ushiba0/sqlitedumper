@@ -55,8 +55,6 @@ async fn dump_table(
     dump_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Dumping table {table_name}");
-    let start_time = std::time::Instant::now();
-
     let file = {
         let dir = std::path::Path::new(dump_dir);
         let path = dir.join(format!("{table_name}.csv"));
@@ -157,7 +155,7 @@ fn get_tables(db: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     Ok(table_names)
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = std::time::Instant::now();
     let cli_commands = handle_cmd_args()?;
