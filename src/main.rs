@@ -85,6 +85,15 @@ async fn dump_table(table_name: &str, dump_dir: &str) -> Result<(), Box<dyn std:
         csv_writer.write_record(None::<&[u8]>)?; // 改行
     }
 
+    drop(rows);
+    drop(stmt);
+    match conn.close(){
+        Ok(()) => {},
+        Err((_, err)) =>{
+                log::error!("Error while closing db connection. {err}");
+        }
+    }
+
     log::info!(
         "Table {table_name} dump completed. Elapsed {} ms",
         start_time.elapsed().as_millis()
@@ -121,6 +130,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     table_names.push(table_name);
                 }
                 Err(e) => log::error!("⚠️ Error while getting table name {e}"),
+            }
+        }
+
+        drop(stmt);
+        match conn.close(){
+            Ok(()) => {},
+            Err((_, err)) => {
+                log::error!("Error while closing db connection. {err}");
             }
         }
         table_names
