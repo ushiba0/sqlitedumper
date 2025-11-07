@@ -17,6 +17,10 @@ struct CommandArguments {
     /// Output directory.
     #[clap(short, long, default_value = DUMP_OUTPUT_DIR_DEFAULT)]
     dir: String,
+
+    /// Same as --log debug.
+    #[arg(short, long, action = clap::ArgAction::SetTrue)]
+    verbose: bool,
 }
 
 fn set_loglevel(loglevel: &str) {
@@ -36,12 +40,20 @@ fn handle_cmd_args() -> Result<CommandArguments, Box<dyn std::error::Error>> {
         other => return Err(format!("Invalid log level '{other}'").into()),
     }
 
+    if cli_commands.verbose {
+        set_loglevel("DEBUG");
+    }
+
     env_logger::init();
     log::debug!("{cli_commands:?}");
     Ok(cli_commands)
 }
 
-async fn dump_table(table_name: &str, dump_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn dump_table(
+    db: &str,
+    table_name: &str,
+    dump_dir: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Dumping table {table_name}");
     let start_time = std::time::Instant::now();
 
@@ -56,17 +68,19 @@ async fn dump_table(table_name: &str, dump_dir: &str) -> Result<(), Box<dyn std:
             .into_std()
             .await
     };
-    let conn = create_db_connection_ro()?;
+    let conn = create_db_connection_ro(db)?;
     let query = format!("SELECT * FROM '{}'", table_name);
     let mut stmt = conn.prepare(&query)?;
     let column_count = stmt.column_count();
     let mut column_name: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut csv_writer = csv::Writer::from_writer(file);
-    let  timestamp_position= column_name.iter().position(|name|name == "sm_timestamp" || name == "timestamp");
+    let timestamp_position = column_name
+        .iter()
+        .position(|name| name == "sm_timestamp" || name == "timestamp");
 
     if let Some(pos) = timestamp_position {
-        column_name.insert(pos+1, "timestamp_parsed".to_string());
-    }    
+        column_name.insert(pos + 1, "timestamp_parsed".to_string());
+    }
 
     // Write header;
     csv_writer.write_record(&column_name)?;
@@ -91,7 +105,7 @@ async fn dump_table(table_name: &str, dump_dir: &str) -> Result<(), Box<dyn std:
                     use chrono::prelude::*;
                     let ts = txt.parse::<i64>()?;
                     let datetime = Utc.timestamp_opt(ts, 0).unwrap();
-                    let a =     datetime.to_rfc3339_opts(SecondsFormat::Secs, true);
+                    let a = datetime.to_rfc3339_opts(SecondsFormat::Secs, true);
                     csv_writer.write_field(&a)?;
                 }
             }
@@ -107,24 +121,17 @@ async fn dump_table(table_name: &str, dump_dir: &str) -> Result<(), Box<dyn std:
             log::error!("Error while closing db connection. {err}");
         }
     }
-
-    log::info!(
-        "Table {table_name} dump completed. Elapsed {} ms",
-        start_time.elapsed().as_millis()
-    );
     Ok(())
 }
 
-fn create_db_connection_ro() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
-    let conn = rusqlite::Connection::open_with_flags(
-        "appliance_stats.sqlite",
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+fn create_db_connection_ro(db: &str) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     Ok(conn)
 }
 
-fn get_tables() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let conn = create_db_connection_ro()?;
+fn get_tables(db: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let conn = create_db_connection_ro(db)?;
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';",
     )?;
@@ -150,11 +157,11 @@ fn get_tables() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     Ok(table_names)
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = std::time::Instant::now();
     let cli_commands = handle_cmd_args()?;
-    let table_names = get_tables()?;
+    let table_names = get_tables(&cli_commands.file)?;
 
     // ダンプ先ディレクトリ作成
     let dump_path = std::path::Path::new(&cli_commands.dir);
@@ -165,14 +172,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for tbl_name in table_names.iter() {
         let table_name = tbl_name.to_string();
         let dump_dir = cli_commands.dir.clone();
+        let db = cli_commands.file.clone();
         let jh = tokio::spawn(async move {
-            let result = dump_table(&table_name, &dump_dir).await;
+            log::debug!("Start thread for table {table_name}");
+            let thread_start_time = std::time::Instant::now();
+            let result = dump_table(&db, &table_name, &dump_dir).await;
             match result {
                 Ok(()) => {}
                 Err(e) => log::error!("Error while handling table {table_name}. {e}"),
             }
+            log::debug!(
+                "Table {table_name} dump completed. Elapsed {} ms",
+                thread_start_time.elapsed().as_millis()
+            );
         });
-        log::debug!("Thread {} spawned.", tbl_name);
+        log::debug!("Thread {} created.", tbl_name);
         joinhandles.push(jh);
     }
 
