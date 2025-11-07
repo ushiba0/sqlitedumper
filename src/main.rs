@@ -57,11 +57,16 @@ async fn dump_table(table_name: &str, dump_dir: &str) -> Result<(), Box<dyn std:
             .await
     };
     let conn = create_db_connection_ro()?;
-    let query = format!("SELECT * FROM {}", table_name);
+    let query = format!("SELECT * FROM '{}'", table_name);
     let mut stmt = conn.prepare(&query)?;
     let column_count = stmt.column_count();
-    let column_name: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut column_name: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut csv_writer = csv::Writer::from_writer(file);
+    let  timestamp_position= column_name.iter().position(|name|name == "sm_timestamp" || name == "timestamp");
+
+    if let Some(pos) = timestamp_position {
+        column_name.insert(pos+1, "timestamp_parsed".to_string());
+    }    
 
     // Write header;
     csv_writer.write_record(&column_name)?;
@@ -81,16 +86,25 @@ async fn dump_table(table_name: &str, dump_dir: &str) -> Result<(), Box<dyn std:
                 Type::Null => "null".to_string(),
             };
             csv_writer.write_field(&txt)?;
+            if let Some(pos) = timestamp_position {
+                if pos == i {
+                    use chrono::prelude::*;
+                    let ts = txt.parse::<i64>()?;
+                    let datetime = Utc.timestamp_opt(ts, 0).unwrap();
+                    let a =     datetime.to_rfc3339_opts(SecondsFormat::Secs, true);
+                    csv_writer.write_field(&a)?;
+                }
+            }
         }
         csv_writer.write_record(None::<&[u8]>)?; // 改行
     }
 
     drop(rows);
     drop(stmt);
-    match conn.close(){
-        Ok(()) => {},
-        Err((_, err)) =>{
-                log::error!("Error while closing db connection. {err}");
+    match conn.close() {
+        Ok(()) => {}
+        Err((_, err)) => {
+            log::error!("Error while closing db connection. {err}");
         }
     }
 
@@ -109,39 +123,38 @@ fn create_db_connection_ro() -> Result<rusqlite::Connection, Box<dyn std::error:
     Ok(conn)
 }
 
+fn get_tables() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let conn = create_db_connection_ro()?;
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';",
+    )?;
+    let table_names_row = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut table_names = Vec::new();
+    for table_name_res in table_names_row {
+        match table_name_res {
+            Ok(table_name) => {
+                log::info!("Found table name {table_name}");
+                table_names.push(table_name);
+            }
+            Err(e) => log::error!("⚠️ Error while getting table name {e}"),
+        }
+    }
+
+    drop(stmt);
+    match conn.close() {
+        Ok(()) => {}
+        Err((_, err)) => {
+            log::error!("Error while closing db connection. {err}");
+        }
+    }
+    Ok(table_names)
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = std::time::Instant::now();
     let cli_commands = handle_cmd_args()?;
-    let table_names = {
-        let conn = create_db_connection_ro()?;
-        let mut stmt = conn.prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';",
-        )?;
-        let table_names_row = stmt.query_map([], |row| {
-            // 各行から 'name' カラム（テーブル名）を取得
-            row.get::<_, String>(0)
-        })?;
-        let mut table_names = Vec::new();
-        for table_name_res in table_names_row {
-            match table_name_res {
-                Ok(table_name) => {
-                    log::info!("Found table name {table_name}");
-                    table_names.push(table_name);
-                }
-                Err(e) => log::error!("⚠️ Error while getting table name {e}"),
-            }
-        }
-
-        drop(stmt);
-        match conn.close(){
-            Ok(()) => {},
-            Err((_, err)) => {
-                log::error!("Error while closing db connection. {err}");
-            }
-        }
-        table_names
-    };
+    let table_names = get_tables()?;
 
     // ダンプ先ディレクトリ作成
     let dump_path = std::path::Path::new(&cli_commands.dir);
